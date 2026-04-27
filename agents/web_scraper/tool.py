@@ -1,28 +1,11 @@
 """LangChain tool binding for competitor price scraping."""
 
-from pathlib import Path
-
-import requests
-from bs4 import BeautifulSoup
 from langchain_core.tools import tool
 
-from .constants import AGENT_NAME, HTTP_TIMEOUT_SECONDS
+from .constants import AGENT_NAME
 from .models import ScrapeInput, ScrapeOutput
-from .parser import extract_competitor_price
+from .scraper import scrape_product
 from shared.logger import log_event
-
-
-def _load_html(html_source: str) -> tuple[str, str]:
-    if html_source.startswith(("http://", "https://")):
-        response = requests.get(html_source, timeout=HTTP_TIMEOUT_SECONDS)
-        response.raise_for_status()
-        return response.text, html_source
-
-    path = Path(html_source).resolve()
-    if not path.is_file():
-        raise FileNotFoundError(f"HTML file not found: {html_source}")
-
-    return path.read_text(encoding="utf-8"), str(path)
 
 
 @tool
@@ -60,27 +43,20 @@ def scrape_competitor_price(product_name: str, html_source: str = "competitor.ht
             f"source={request.html_source!r})"
         ),
     )
-    try:
-        html_content, source_label = _load_html(request.html_source)
-        soup = BeautifulSoup(html_content, "html.parser")
-        price = extract_competitor_price(soup, request.product_name)
-        out = ScrapeOutput.success(
-            product_name=request.product_name,
-            competitor_price=price,
-            source=source_label,
-        )
-        log_event(
-            "TOOL_RESULT",
-            AGENT_NAME,
-            f"{request.product_name!r} → ${price} (source: {source_label})",
-        )
-        return out.model_dump_json()
 
-    except Exception as exc:
+    result = scrape_product(request.product_name, request.html_source)
+
+    if result.status.startswith("fallback_used"):
         log_event(
             "TOOL_ERROR",
             AGENT_NAME,
-            f"scrape_competitor_price failed: {exc} — using fallback",
+            f"scrape_competitor_price failed: {result.status} — using fallback",
         )
-        out = ScrapeOutput.fallback(product_name=request.product_name, reason=str(exc))
-        return out.model_dump_json()
+    else:
+        log_event(
+            "TOOL_RESULT",
+            AGENT_NAME,
+            f"{request.product_name!r} → ${result.competitor_price} (source: {result.source})",
+        )
+
+    return result.model_dump_json()
