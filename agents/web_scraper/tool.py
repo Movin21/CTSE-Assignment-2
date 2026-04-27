@@ -6,9 +6,23 @@ import requests
 from bs4 import BeautifulSoup
 from langchain_core.tools import tool
 
-from .constants import AGENT_NAME, FALLBACK_PRICE, FALLBACK_SOURCE, HTTP_TIMEOUT_SECONDS
+from .constants import AGENT_NAME, HTTP_TIMEOUT_SECONDS
 from .models import ScrapeInput, ScrapeOutput
+from .parser import extract_competitor_price
 from shared.logger import log_event
+
+
+def _load_html(html_source: str) -> tuple[str, str]:
+    if html_source.startswith(("http://", "https://")):
+        response = requests.get(html_source, timeout=HTTP_TIMEOUT_SECONDS)
+        response.raise_for_status()
+        return response.text, html_source
+
+    path = Path(html_source).resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"HTML file not found: {html_source}")
+
+    return path.read_text(encoding="utf-8"), str(path)
 
 
 @tool
@@ -47,40 +61,9 @@ def scrape_competitor_price(product_name: str, html_source: str = "competitor.ht
         ),
     )
     try:
-        if request.html_source.startswith(("http://", "https://")):
-            resp = requests.get(request.html_source, timeout=HTTP_TIMEOUT_SECONDS)
-            resp.raise_for_status()
-            html_content = resp.text
-            source_label = request.html_source
-        else:
-            path = Path(request.html_source).resolve()
-            if not path.is_file():
-                raise FileNotFoundError(f"HTML file not found: {request.html_source}")
-            html_content = path.read_text(encoding="utf-8")
-            source_label = str(path)
-
+        html_content, source_label = _load_html(request.html_source)
         soup = BeautifulSoup(html_content, "html.parser")
-        price: float | None = None
-
-        elem = soup.find(attrs={"data-name": request.product_name})
-        if elem:
-            price_el = elem.find(class_="price")
-            if price_el:
-                price = float(price_el.get_text(strip=True).replace("$", "").replace(",", ""))
-
-        if price is None:
-            for row in soup.find_all("tr"):
-                cells = row.find_all("td")
-                if cells and request.product_name.lower() in cells[0].get_text(strip=True).lower():
-                    if len(cells) > 1:
-                        price = float(
-                            cells[1].get_text(strip=True).replace("$", "").replace(",", "")
-                        )
-                        break
-
-        if price is None:
-            raise ValueError(f"Product '{request.product_name}' not found in HTML source")
-
+        price = extract_competitor_price(soup, request.product_name)
         out = ScrapeOutput.success(
             product_name=request.product_name,
             competitor_price=price,
@@ -99,10 +82,5 @@ def scrape_competitor_price(product_name: str, html_source: str = "competitor.ht
             AGENT_NAME,
             f"scrape_competitor_price failed: {exc} — using fallback",
         )
-        out = ScrapeOutput(
-            product_name=request.product_name,
-            competitor_price=FALLBACK_PRICE,
-            source=FALLBACK_SOURCE,
-            status=f"fallback_used: {exc}",
-        )
+        out = ScrapeOutput.fallback(product_name=request.product_name, reason=str(exc))
         return out.model_dump_json()
