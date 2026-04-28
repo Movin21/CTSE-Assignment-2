@@ -3,7 +3,7 @@
 from langchain_core.tools import tool
 
 from .constants import AGENT_NAME
-from .models import ScrapeInput, ScrapeOutput
+from .models import ScrapeInput
 from .scraper import scrape_product
 from shared.logger import log_event
 

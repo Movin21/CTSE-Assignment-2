@@ -51,8 +51,9 @@ def _invoke_scrape_tool(*, product_name: str, html_source: str) -> ScrapeOutput:
     return ScrapeOutput.model_validate_json(raw)
 
 
-def _tool_args_from_call(tool_call: dict[str, Any], *, product_name: str) -> dict[str, str]:
-    args = tool_call.get("args") or {}
+def _tool_args_from_call(tool_call: Any, *, product_name: str) -> dict[str, str]:
+    raw_args = tool_call.get("args", {}) if isinstance(tool_call, dict) else getattr(tool_call, "args", {})
+    args = raw_args if isinstance(raw_args, dict) else {}
     return {
         "product_name": str(args.get("product_name") or product_name),
         "html_source": str(args.get("html_source") or DEFAULT_HTML_SOURCE),
