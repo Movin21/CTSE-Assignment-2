@@ -119,7 +119,12 @@ def web_scraper_node(state: GlobalState) -> GlobalState:
     messages: list[Any] = list(state.get("messages") or [])
 
     for item in inventory:
-        product_name = str(item["product_name"])
+        product_name = item.get("product_name")
+        if not product_name:
+            log_event("AGENT_WARN", AGENT_NAME, f"Skipping inventory row without product_name: {item!r}")
+            state["errors"].append(f"{AGENT_NAME}: inventory row missing product_name")
+            continue
+        product_name = str(product_name)
         result, response = _scrape_via_llm(
             llm_with_tools,
             product_name=product_name,
