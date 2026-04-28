@@ -66,7 +66,7 @@ def _record_scrape_result(
     *,
     via_direct: bool,
 ) -> None:
-    prefix = "fallback direct" if via_direct else "scraped"
+    prefix = "direct tool call" if via_direct else "scraped"
     state["logs"].append(
         f"[{AGENT_NAME}] {result.product_name!r} {prefix} → "
         f"${result.competitor_price} "
