@@ -1,10 +1,13 @@
 """LangGraph node for the Web Scraper agent."""
 
+from __future__ import annotations
+
 import time
+from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from .constants import AGENT_NAME, DEFAULT_HTML_SOURCE
+from .constants import AGENT_NAME, DEFAULT_HTML_SOURCE, FALLBACK_STATUS_PREFIX
 from .models import ScrapeOutput
 from .tool import scrape_competitor_price
 from shared.llm import _llm
@@ -29,11 +32,76 @@ RESPONSE FORMAT RULES:
   - Pass product_name verbatim — do not alter spelling, capitalisation, or encoding."""
 
 
-def _parse_tool_result(raw: str) -> ScrapeOutput:
+def _build_scrape_messages(product_name: str, html_source: str) -> list[SystemMessage | HumanMessage]:
+    return [
+        SystemMessage(content=_SYSTEM_PROMPT),
+        HumanMessage(
+            content=(
+                f"Scrape the competitor price for {product_name!r} from {html_source!r} "
+                "using the scrape_competitor_price tool."
+            )
+        ),
+    ]
+
+
+def _invoke_scrape_tool(*, product_name: str, html_source: str) -> ScrapeOutput:
+    raw = scrape_competitor_price.invoke(
+        {"product_name": product_name, "html_source": html_source}
+    )
     return ScrapeOutput.model_validate_json(raw)
 
 
-def run_scraper_agent(state: GlobalState) -> GlobalState:
+def _tool_args_from_call(tool_call: dict[str, Any], *, product_name: str) -> dict[str, str]:
+    args = tool_call.get("args") or {}
+    return {
+        "product_name": str(args.get("product_name") or product_name),
+        "html_source": str(args.get("html_source") or DEFAULT_HTML_SOURCE),
+    }
+
+
+def _record_scrape_result(
+    state: GlobalState,
+    result: ScrapeOutput,
+    *,
+    via_direct: bool,
+) -> None:
+    prefix = "fallback direct" if via_direct else "scraped"
+    state["logs"].append(
+        f"[{AGENT_NAME}] {result.product_name!r} {prefix} → "
+        f"${result.competitor_price} "
+        f"(source={result.source}, status={result.status})"
+    )
+    if result.status.startswith(FALLBACK_STATUS_PREFIX):
+        state["errors"].append(
+            f"{AGENT_NAME}: unverified fallback for {result.product_name!r} — {result.status}"
+        )
+
+
+def _scrape_via_llm(
+    llm_with_tools: Any,
+    *,
+    product_name: str,
+    html_source: str,
+) -> tuple[ScrapeOutput, AIMessage]:
+    response: AIMessage = llm_with_tools.invoke(_build_scrape_messages(product_name, html_source))
+
+    if not response.tool_calls:
+        log_event(
+            "AGENT_WARN",
+            AGENT_NAME,
+            f"LLM did not call tool for {product_name!r} — forcing direct call",
+        )
+        result = _invoke_scrape_tool(product_name=product_name, html_source=html_source)
+        return result, response
+
+    tool_call = response.tool_calls[0]
+    args = _tool_args_from_call(tool_call, product_name=product_name)
+    result = _invoke_scrape_tool(**args)
+    return result, response
+
+
+def web_scraper_node(state: GlobalState) -> GlobalState:
+    """Scrape competitor prices for every product in inventory."""
     log_event("AGENT_START", AGENT_NAME, "→ entering node")
     start = time.perf_counter()
 
@@ -47,52 +115,22 @@ def run_scraper_agent(state: GlobalState) -> GlobalState:
 
     llm_with_tools = _llm.bind_tools([scrape_competitor_price])
     competitor_data: dict[str, float] = {}
-    last_response: AIMessage | None = None
+    messages: list[Any] = list(state.get("messages") or [])
 
     for item in inventory:
         product_name = str(item["product_name"])
-
-        messages = [
-            SystemMessage(content=_SYSTEM_PROMPT),
-            HumanMessage(
-                content=(
-                    f"Scrape the competitor price for {product_name!r} from {DEFAULT_HTML_SOURCE!r} "
-                    "using the scrape_competitor_price tool."
-                )
-            ),
-        ]
-
-        response: AIMessage = llm_with_tools.invoke(messages)
-        last_response = response
-
-        if response.tool_calls:
-            for tc in response.tool_calls:
-                raw = scrape_competitor_price.invoke(tc["args"])
-                result = _parse_tool_result(raw)
-                competitor_data[product_name] = result.competitor_price
-                state["logs"].append(
-                    f"[{AGENT_NAME}] {result.product_name!r} → ${result.competitor_price} "
-                    f"(source={result.source}, status={result.status})"
-                )
-        else:
-            log_event(
-                "AGENT_WARN",
-                AGENT_NAME,
-                f"LLM did not call tool for {product_name!r} — forcing direct call",
-            )
-            raw = scrape_competitor_price.invoke(
-                {"product_name": product_name, "html_source": DEFAULT_HTML_SOURCE}
-            )
-            result = _parse_tool_result(raw)
-            competitor_data[product_name] = result.competitor_price
-            state["logs"].append(
-                f"[{AGENT_NAME}] {result.product_name!r} fallback direct → ${result.competitor_price}"
-            )
+        result, response = _scrape_via_llm(
+            llm_with_tools,
+            product_name=product_name,
+            html_source=DEFAULT_HTML_SOURCE,
+        )
+        competitor_data[product_name] = result.competitor_price
+        _record_scrape_result(state, result, via_direct=not response.tool_calls)
+        messages.append(response)
 
     state["competitor_data"] = competitor_data
     state["current_agent"] = AGENT_NAME
-    if last_response:
-        state["messages"] = state.get("messages", []) + [last_response]
+    state["messages"] = messages
 
     elapsed = round(time.perf_counter() - start, 3)
     state["execution_times"][AGENT_NAME] = elapsed
@@ -102,3 +140,6 @@ def run_scraper_agent(state: GlobalState) -> GlobalState:
         f"← exiting node, scraped {len(competitor_data)} prices, duration={elapsed}s",
     )
     return state
+
+
+run_scraper_agent = web_scraper_node
