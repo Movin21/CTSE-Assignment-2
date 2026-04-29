@@ -30,14 +30,29 @@ def calculate_margin_price(
     competitor_price: float,
     markup_percent: float = 20.0,
 ) -> str:
-    """Apply a percentage markup to cost and return a suggested selling price."""
+    """Apply a percentage markup to cost and choose a pricing strategy.
+
+    Selects one of three strategies based on how markup price compares to competitor:
+    - below_competitor_with_margin: markup price is already > 5% below competitor
+    - capped_at_competitor: markup price exceeds competitor by > 10%; cap at 99%
+    - standard_markup: markup price is within normal range of competitor
+    """
     log_event("TOOL_CALL", "PriceStrategist",
               f"calculate_margin_price(product='{product_name}', cost={cost}, "
               f"competitor={competitor_price})")
     try:
         markup_price = round(cost * (1 + markup_percent / 100), 2)
-        suggested_price = markup_price
-        strategy = "standard_markup"
+
+        if markup_price < competitor_price * 0.95:
+            suggested_price = markup_price
+            strategy = "below_competitor_with_margin"
+        elif markup_price > competitor_price * 1.10:
+            suggested_price = round(competitor_price * 0.99, 2)
+            strategy = "capped_at_competitor"
+        else:
+            suggested_price = markup_price
+            strategy = "standard_markup"
+
         actual_margin = round(((suggested_price - cost) / suggested_price) * 100, 2)
 
         out = MarginOutput(
@@ -48,6 +63,9 @@ def calculate_margin_price(
             margin_percent=actual_margin,
             pricing_strategy=strategy,
         )
+        log_event("TOOL_RESULT", "PriceStrategist",
+                  f"'{product_name}' -> suggested=${suggested_price}, "
+                  f"margin={actual_margin}%, strategy={strategy}")
         return out.model_dump_json()
 
     except Exception as exc:
