@@ -144,23 +144,21 @@ def _print_result(test_name: str, result: dict[str, Any]) -> None:
 
 def test_inventory_happy_path() -> dict[str, Any]:
     """Happy path: load inventory.csv and validate all 8 products."""
-    raw = read_inventory_csv.invoke({"csv_path": "inventory.csv"})
-    result = json.loads(raw)
+    items = read_inventory_csv.invoke({"csv_path": "inventory.csv"})
+    raw = json.dumps(items)
 
     evaluation = _judge_output(
         agent_name="InventoryManager — Detail-oriented Data Clerk",
         task=(
-            "Load 'inventory.csv' and return a list of products with product_name and cost. "
-            "No hallucinated products. Status must be 'success'. Count must match items length."
+            "Load 'inventory.csv' and return a list of dicts with product_name and cost. "
+            "No hallucinated products. Expect eight valid rows."
         ),
         output=raw,
     )
 
     issues: list[str] = []
-    items = result.get("items", [])
-
-    if result.get("status") != "success":
-        issues.append(f"status is not 'success': {result.get('status')}")
+    if not isinstance(items, list):
+        issues.append("tool must return a list[dict]")
     if not items:
         issues.append("items list is empty — no products loaded")
     for item in items:
@@ -169,8 +167,8 @@ def test_inventory_happy_path() -> dict[str, Any]:
         cost = item.get("cost")
         if cost is None or not isinstance(cost, (int, float)) or cost <= 0:
             issues.append(f"Invalid cost for '{item.get('product_name')}': {cost}")
-    if result.get("count") != len(items):
-        issues.append(f"count mismatch: reported {result.get('count')}, actual {len(items)}")
+    if len(items) != 8:
+        issues.append(f"expected 8 products from inventory.csv, got {len(items)}")
 
     _apply_programmatic_override(evaluation, issues)
     _print_result("Inventory Manager — Happy Path", evaluation)
@@ -178,17 +176,16 @@ def test_inventory_happy_path() -> dict[str, Any]:
 
 
 def test_inventory_missing_file() -> dict[str, Any]:
-    """Edge case: non-existent CSV must return status starting with 'error:'."""
-    raw = read_inventory_csv.invoke({"csv_path": "does_not_exist_xyz.csv"})
-    result = json.loads(raw)
-
+    """Edge case: non-existent CSV must raise FileNotFoundError with a clear message."""
     issues: list[str] = []
-    if not result.get("status", "").startswith("error:"):
-        issues.append(f"Expected status to start with 'error:', got: {result.get('status')}")
-    if result.get("count", -1) != 0:
-        issues.append(f"count should be 0 on error, got: {result.get('count')}")
-    if result.get("items"):
-        issues.append("items should be empty on error")
+    try:
+        read_inventory_csv.invoke({"csv_path": "does_not_exist_xyz.csv"})
+        issues.append("Expected FileNotFoundError for missing CSV")
+    except FileNotFoundError as exc:
+        if "CSV file not found" not in str(exc):
+            issues.append(f"Unexpected FileNotFoundError message: {exc}")
+    except Exception as exc:  # pragma: no cover - defensive
+        issues.append(f"Expected FileNotFoundError, got {type(exc).__name__}: {exc}")
 
     evaluation = {"verdict": "", "accuracy_score": 10, "security_score": 10,
                   "completeness_score": 10, "reasoning": "Programmatic edge-case check", "issues": []}
@@ -208,18 +205,16 @@ def test_inventory_negative_cost() -> dict[str, Any]:
         tmp_path = f.name
 
     try:
-        raw = read_inventory_csv.invoke({"csv_path": tmp_path})
-        result = json.loads(raw)
+        items = read_inventory_csv.invoke({"csv_path": tmp_path})
     finally:
         os.unlink(tmp_path)
 
     issues: list[str] = []
-    if result.get("status", "").startswith("success") and result.get("count", 0) > 0:
-        for item in result.get("items", []):
-            if item.get("cost", 0) <= 0:
-                issues.append(
-                    f"Negative cost accepted for '{item['product_name']}': {item['cost']}"
-                )
+    for item in items:
+        if item.get("cost", 0) <= 0:
+            issues.append(
+                f"Negative cost accepted for '{item['product_name']}': {item['cost']}"
+            )
 
     evaluation = {"verdict": "", "accuracy_score": 10, "security_score": 10,
                   "completeness_score": 10, "reasoning": "Programmatic edge-case check", "issues": []}
