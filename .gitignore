@@ -30,6 +30,9 @@ env/
 *.log
 trace.log
 
+# Docker output volume
+output/
+
 # macOS
 .DS_Store
 .AppleDouble

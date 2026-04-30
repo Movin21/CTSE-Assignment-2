@@ -1,0 +1,30 @@
+# Git
+.git/
+.gitignore
+
+# Claude Code
+.claude/
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Runtime artefacts (generated inside container)
+*.db
+*.log
+trace.log
+output/
+
+# macOS
+.DS_Store
+
+# IDEs
+.vscode/
+.idea/
+
+# Docker files themselves (not needed in build context)
+docker-compose.yml
+.dockerignore

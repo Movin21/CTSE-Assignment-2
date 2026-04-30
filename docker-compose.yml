@@ -1,0 +1,54 @@
+services:
+
+  # ── Ollama LLM Server ────────────────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ctse_ollama
+    volumes:
+      - ollama_models:/root/.ollama   # persist downloaded models across restarts
+    ports:
+      - "11434:11434"                 # expose for local dev access if needed
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    restart: unless-stopped
+
+  # ── Swarm Application ────────────────────────────────────────────────────────
+  swarm:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ctse_swarm
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: llama3.2
+    volumes:
+      - ./output:/app/output          # persist catalog.db and trace.log on host
+    working_dir: /app
+    command: python3 graph.py
+
+  # ── Evaluation Runner (run on demand) ────────────────────────────────────────
+  evaluation:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ctse_evaluation
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: llama3.2
+    working_dir: /app
+    command: python3 evaluation.py
+    profiles:
+      - eval                          # only starts with: docker compose --profile eval up
+
+volumes:
+  ollama_models:
