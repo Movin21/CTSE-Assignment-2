@@ -5,7 +5,6 @@
 
 A locally-hosted **Multi-Agent AI System (MAS)** built with **LangGraph** and **Ollama (llama3.2)** that autonomously monitors competitor pricing, computes optimal selling prices, and persists results to a local database — entirely at zero cloud cost.
 
-> **GitHub Repository:** `https://github.com/<your-org>/ctse-assignment-2`
 
 ---
 
