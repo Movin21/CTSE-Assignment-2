@@ -32,10 +32,52 @@ def calculate_margin_price(
 ) -> str:
     """Apply a percentage markup to cost and choose a pricing strategy.
 
-    Selects one of three strategies based on how markup price compares to competitor:
-    - below_competitor_with_margin: markup price is already > 5% below competitor
-    - capped_at_competitor: markup price exceeds competitor by > 10%; cap at 99%
-    - standard_markup: markup price is within normal range of competitor
+    Computes ``markup_price = cost * (1 + markup_percent / 100)`` then
+    selects one of four strategies based on how that price compares to the
+    competitor:
+
+    - ``below_competitor_with_margin``: markup_price is more than 5% below
+      competitor â€” it is already competitive, so use it directly.
+    - ``capped_at_competitor``: markup_price exceeds competitor by more than
+      10% â€” cap at 99% of competitor to remain competitive.
+    - ``standard_markup``: markup_price is within Â±5â€“10% of competitor â€”
+      use the markup price.
+    - ``floor_applied``: any strategy would push the price below cost â€”
+      apply a hard floor at cost * 1.01 (1% above cost).
+
+    Note: ``markup_percent`` and ``margin_percent`` are *different*:
+    - Markup % = (price âˆ’ cost) / cost Ã— 100  (applied to cost, e.g. 20%)
+    - Margin % = (price âˆ’ cost) / price Ã— 100 (gross margin, e.g. 16.67%)
+
+    Args:
+        product_name: Name of the product being priced.
+        cost: Our purchase/production cost. Must be positive.
+        competitor_price: The competitor's current selling price. Must be positive.
+        markup_percent: Percentage markup to apply to ``cost``.
+            Must be between 0 and 100. Defaults to ``20.0``.
+
+    Returns:
+        JSON string conforming to ``MarginOutput``:
+        ``{"product_name": str, "cost": float, "competitor_price": float,
+           "suggested_price": float, "margin_percent": float,
+           "pricing_strategy": str}``
+        On error: ``{"error": "<reason>", "product_name": str}``
+
+    Raises:
+        Does not raise â€” all exceptions are caught and returned as an
+        error dict so the pipeline can log and continue.
+
+    Example:
+        >>> raw = calculate_margin_price.invoke({
+        ...     "product_name": "Laptop", "cost": 500.0,
+        ...     "competitor_price": 650.0, "markup_percent": 20.0})
+        >>> import json; data = json.loads(raw)
+        >>> data["suggested_price"]
+        600.0
+        >>> data["pricing_strategy"]
+        'below_competitor_with_margin'
+        >>> data["margin_percent"]  # (600-500)/600*100
+        16.67
     """
     log_event("TOOL_CALL", "PriceStrategist",
               f"calculate_margin_price(product='{product_name}', cost={cost}, "
@@ -52,6 +94,11 @@ def calculate_margin_price(
         else:
             suggested_price = markup_price
             strategy = "standard_markup"
+
+        # Hard constraint: price must never go below cost
+        if suggested_price < cost:
+            suggested_price = round(cost * 1.01, 2)
+            strategy = "floor_applied"
 
         actual_margin = round(((suggested_price - cost) / suggested_price) * 100, 2)
 
