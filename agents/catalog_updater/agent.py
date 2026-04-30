@@ -59,7 +59,7 @@ def run_updater_agent(state: GlobalState) -> GlobalState:
     if response.tool_calls:
         for tc in response.tool_calls:
             args = dict(tc["args"])
-            if isinstance(args.get("entries"), list):
+            if not isinstance(args.get("entries"), str):
                 args["entries"] = json.dumps(args["entries"])
             raw = save_to_local_db.invoke(args)
             result = json.loads(raw)
