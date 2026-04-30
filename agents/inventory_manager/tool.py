@@ -1,114 +1,80 @@
-"""Inventory CSV loading tool for the Inventory Manager agent."""
-
-from __future__ import annotations
-
 import csv
-import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List
 
 from langchain_core.tools import tool
+from pydantic import BaseModel, Field
 
-from shared.logger import log_tool_call
-
-KEY_COST = "cost"
-KEY_PRODUCT_NAME = "product_name"
-
-_logger = logging.getLogger(__name__)
+from shared.logger import log_event
 
 
-def _strip_row(row: dict[str | None, Any]) -> dict[str, Any]:
-    """Return a copy of the row with stripped keys and stripped string values."""
-    out: dict[str, Any] = {}
-    for key, value in row.items():
-        if key is None:
-            continue
-        sk = key.strip()
-        if isinstance(value, str):
-            out[sk] = value.strip()
-        elif value is None:
-            out[sk] = ""
-        else:
-            out[sk] = value
-    return out
+class ReadInventoryInput(BaseModel):
+    csv_path: str = Field(default="inventory.csv", description="Path to the inventory CSV file")
+
+
+class ReadInventoryOutput(BaseModel):
+    items: List[Dict[str, Any]] = Field(..., description="List of {product_name, cost} dicts")
+    count: int = Field(..., description="Number of items loaded")
+    status: str = Field(..., description="'success' or 'error: <reason>'")
 
 
 @tool
-def read_inventory_csv(csv_path: str) -> list[dict]:
-    """Read a CSV file from a given path and return a list of validated product dicts.
+def read_inventory_csv(csv_path: str = "inventory.csv") -> str:
+    """Load product inventory from a CSV file and validate every row.
 
-    Parses the file with ``csv.DictReader``, normalizes keys and string values by
-    stripping whitespace, and keeps only rows with a non-empty ``product_name`` and
-    a strictly positive ``cost`` that parses as a float. Rows that fail validation
-    are skipped and a warning is logged.
+    Reads the CSV at ``csv_path``, validates that the required columns
+    ``product_name`` and ``cost`` are present, ensures each cost is a
+    positive number, and returns the result as a JSON-encoded
+    ``ReadInventoryOutput``.  All exceptions are caught and surfaced as
+    ``status="error: <reason>"`` so the pipeline never crashes.
 
     Args:
-        csv_path: Path to the inventory CSV file. Expected columns include
-            ``product_name`` and ``cost`` (after key stripping).
+        csv_path: Relative or absolute path to the inventory CSV file.
+            Must contain columns ``product_name`` and ``cost``.
+            Defaults to ``"inventory.csv"`` in the working directory.
 
     Returns:
-        A list of product records. Each dict contains at least ``product_name`` (str)
-        and ``cost`` (float) taken from the CSV without modification beyond
-        stripping whitespace and parsing ``cost`` as a float.
+        JSON string conforming to ``ReadInventoryOutput``:
+        ``{"items": [...], "count": <int>, "status": "success" | "error: <reason>"}``
 
     Raises:
-        FileNotFoundError: If ``csv_path`` does not refer to an existing file.
+        Does not raise — all exceptions are caught and returned inside
+        the ``status`` field to keep the pipeline non-blocking.
 
     Example:
-        >>> read_inventory_csv.invoke({"csv_path": "inventory.csv"})
-        [{'product_name': 'Laptop', 'cost': 750.0}, ...]
+        >>> raw = read_inventory_csv.invoke({"csv_path": "inventory.csv"})
+        >>> import json; data = json.loads(raw)
+        >>> data["status"]
+        'success'
+        >>> data["count"]
+        8
     """
+    log_event("TOOL_CALL", "InventoryManager", f"read_inventory_csv(csv_path='{csv_path}')")
     try:
         path = Path(csv_path)
-        if not path.is_file():
-            raise FileNotFoundError(f"CSV file not found: {csv_path}")
+        if not path.exists():
+            raise FileNotFoundError(f"CSV not found: {csv_path}")
 
-        result: list[dict[str, Any]] = []
-        with path.open(newline="", encoding="utf-8") as fh:
+        items: List[Dict[str, Any]] = []
+        with open(path, newline="", encoding="utf-8") as fh:
             reader = csv.DictReader(fh)
             for row in reader:
-                cleaned = _strip_row(row)
-                name = cleaned.get(KEY_PRODUCT_NAME, "")
-                if not isinstance(name, str):
-                    name = str(name).strip()
-                if not name:
-                    _logger.warning(
-                        "Skipping row: missing or empty %s in %s",
-                        KEY_PRODUCT_NAME,
-                        csv_path,
-                    )
-                    continue
-
-                cost_raw = cleaned.get(KEY_COST)
-                try:
-                    cost_val = float(cost_raw)  # type: ignore[arg-type]
-                except (TypeError, ValueError):
-                    _logger.warning(
-                        "Skipping row: invalid %s for product %r in %s",
-                        KEY_COST,
-                        name,
-                        csv_path,
-                    )
-                    continue
-
+                if "product_name" not in row or "cost" not in row:
+                    raise ValueError("CSV must contain 'product_name' and 'cost' columns")
+                cost_val = float(row["cost"])
                 if cost_val <= 0:
-                    _logger.warning(
-                        "Skipping row: %s must be > 0 for product %r in %s",
-                        KEY_COST,
-                        name,
-                        csv_path,
+                    raise ValueError(
+                        f"Cost for '{row['product_name']}' must be positive, got {cost_val}"
                     )
-                    continue
+                items.append({
+                    "product_name": row["product_name"].strip(),
+                    "cost": cost_val,
+                })
 
-                result.append({KEY_PRODUCT_NAME: name, KEY_COST: cost_val})
+        out = ReadInventoryOutput(items=items, count=len(items), status="success")
+        log_event("TOOL_RESULT", "InventoryManager", f"Loaded {len(items)} products OK")
+        return out.model_dump_json()
 
-        log_tool_call("read_inventory_csv", {"csv_path": csv_path}, result)
-        return result
-
-    except FileNotFoundError:
-        raise FileNotFoundError(f"CSV file not found: {csv_path}") from None
-    except Exception:
-        _logger.exception("read_inventory_csv failed for csv_path=%s", csv_path)
-        result: list[dict[str, Any]] = []
-        log_tool_call("read_inventory_csv", {"csv_path": csv_path}, result)
-        return result
+    except Exception as exc:
+        log_event("TOOL_ERROR", "InventoryManager", f"read_inventory_csv failed: {exc}")
+        return ReadInventoryOutput(items=[], count=0, status=f"error: {exc}").model_dump_json()
