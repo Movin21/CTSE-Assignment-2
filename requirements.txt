@@ -1,0 +1,12 @@
+# E-Commerce Competitor Intelligence Swarm — Python Dependencies
+# Install: pip install -r requirements.txt
+# Requires: Ollama running locally with llama3.2 pulled
+#   ollama pull llama3.2
+
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-ollama>=0.2.0
+langgraph>=0.2.0
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+pydantic>=2.0.0
