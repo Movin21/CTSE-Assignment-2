@@ -57,21 +57,27 @@ def run_updater_agent(state: GlobalState) -> GlobalState:
     catalog_saved = False
 
     if response.tool_calls:
-        for tc in response.tool_calls:
-            args = dict(tc["args"])
-            if not isinstance(args.get("entries"), str):
-                args["entries"] = json.dumps(args["entries"])
-            raw = save_to_local_db.invoke(args)
-            result = json.loads(raw)
-            rows = result.get("rows_saved", 0)
-            status = result.get("status", "")
-            catalog_saved = status == "success"
-            state["logs"].append(
-                f"[CatalogUpdater] save_to_local_db → {rows} rows, "
-                f"db={result.get('db_path')}, status={status}"
-            )
-            if not catalog_saved:
-                state["errors"].append(f"CatalogUpdater: {status}")
+        tc = response.tool_calls[0]
+        args = dict(tc["args"])
+        # Always persist the full pricing payload from state to avoid
+        # LLM argument truncation/shape drift on `entries`.
+        db_path = args.get("db_path", "catalog.db")
+        raw = save_to_local_db.invoke({"entries": entries_json, "db_path": db_path})
+        result = json.loads(raw)
+        rows = result.get("rows_saved", 0)
+        rows_inserted = result.get("rows_inserted", 0)
+        rows_updated = result.get("rows_updated", 0)
+        rows_unchanged = result.get("rows_unchanged", 0)
+        status = result.get("status", "")
+        catalog_saved = status == "success"
+        state["logs"].append(
+            f"[CatalogUpdater] save_to_local_db → {rows} rows "
+            f"(inserted={rows_inserted}, updated={rows_updated}, "
+            f"unchanged={rows_unchanged}), "
+            f"db={result.get('db_path')}, status={status}"
+        )
+        if not catalog_saved:
+            state["errors"].append(f"CatalogUpdater: {status}")
     else:
         log_event("AGENT_WARN", "CatalogUpdater",
                   "LLM did not call tool — forcing direct call")
