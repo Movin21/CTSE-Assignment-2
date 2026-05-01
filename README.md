@@ -18,7 +18,8 @@ A locally-hosted **Multi-Agent AI System (MAS)** built with **LangGraph** and **
 6. [LLMOps & Observability](#6-llmops--observability)
 7. [Evaluation Methodology](#7-evaluation-methodology)
 8. [Setup & Running](#8-setup--running)
-9. [Individual Contributions](#9-individual-contributions)
+9. [Frontend Dashboard (Demo UI)](#9-frontend-dashboard-demo-ui)
+10. [Individual Contributions](#10-individual-contributions)
 
 ---
 
@@ -122,6 +123,13 @@ CTSE Assignment 2/
 ├── state.py                  ← GlobalState TypedDict + Pydantic models
 ├── graph.py                  ← LangGraph orchestration + conditional routing
 ├── evaluation.py             ← LLM-as-a-Judge test suite (13 tests)
+├── ui/
+│   ├── app.py                ← Streamlit dashboard (run/reset/status/analytics)
+│   ├── data_access.py        ← typed DB/log readers + metric helpers
+│   └── models.py             ← Pydantic view models for frontend validation
+├── tests/
+│   ├── test_ui_data_access.py
+│   └── test_ui_app_smoke.py
 ├── inventory.csv             ← product catalogue (data source)
 ├── competitor.html           ← mock competitor website (data source)
 ├── Dockerfile                ← container image definition
@@ -449,6 +457,17 @@ Sample output:
 ==============================================================
 ```
 
+### 7.4 Agent Test Coverage Matrix
+
+Short coverage mapping used in the report/demo:
+
+| Agent | Happy Path | Edge Cases | Security |
+|---|---|---|---|
+| Inventory Manager | `test_inventory_happy_path` | `test_inventory_missing_file`, `test_inventory_negative_cost` | Input validation enforced in parser (invalid/malicious rows rejected via strict checks) |
+| Web Scraper | `test_scraper_happy_path` | `test_scraper_unknown_product` (fallback path) | `test_scraper_security` (`<script>` injection input) |
+| Price Strategist | `test_pricing_happy_path` | `test_pricing_floor_applied`, `test_pricing_capped_at_competitor`, `test_pricing_standard_markup` | Assertions enforce no price-below-cost behavior |
+| Catalog Updater | `test_updater_happy_path` | `test_updater_empty_entries` | `test_updater_sql_injection` (payload stored as literal text due to parameterized SQL) |
+
 ---
 
 ## 8. Setup & Running
@@ -533,9 +552,130 @@ python3 evaluation.py
 | `trace.log` not created | Check write permissions in the project directory |
 | `catalog.db` is empty | Check `trace.log` for a `TOOL_ERROR` from `CatalogUpdater` |
 
+### 8.5 Failure-Case Demo (Robustness)
+
+Use one of these during the demo video/report to prove non-happy-path handling.
+
+#### Case A — Bad inventory CSV
+
+```bash
+# Create a temporary invalid CSV with negative cost
+python3 - <<'PY'
+from pathlib import Path
+Path("bad_inventory.csv").write_text("product_name,cost\nBadProduct,-50\n", encoding="utf-8")
+print("Created bad_inventory.csv")
+PY
+
+# Run only the evaluation edge test for inventory
+python3 -m pytest -q evaluation.py -k "inventory_negative_cost"
+```
+
+Expected result:
+- Test passes for rejection behavior.
+- Tool status contains `error:`.
+- Invalid row is not accepted as valid inventory.
+
+#### Case B — Unknown competitor product fallback
+
+```bash
+# Run scraper edge/security checks from evaluation harness
+python3 -m pytest -q evaluation.py -k "scraper_unknown_product or scraper_security"
+```
+
+Expected result:
+- Unknown product returns `fallback_used` status.
+- Security test input is safely handled (no script execution, no crash).
+
+### 8.6 Reproducibility Checklist (Local)
+
+Use this checklist in both README and report appendix.
+
+1. Environment
+   - Python `3.10+`
+   - Ollama installed and running (`ollama serve`)
+   - Model pulled: `ollama pull llama3.2`
+2. Install dependencies
+   - `pip install -r requirements.txt`
+3. Run MAS pipeline
+   - `python3 graph.py`
+   - Expected: final report prints `Products in inventory: 8`, `Pricing decisions made: 8`, `Catalog persisted: True`
+4. Run evaluation suite
+   - `python3 evaluation.py`
+   - Expected: `Passed: 13 / 13`
+5. Run dashboard
+   - `streamlit run ui/app.py`
+   - Expected: app opens with status cards, metrics, results table, and audit view
+6. Run frontend tests
+   - `python3 -m pytest tests/test_ui_data_access.py tests/test_ui_app_smoke.py`
+   - Expected: all tests pass
+7. Optional clean re-run
+   - Delete `catalog.db` and `trace.log`, then run `python3 graph.py` again to regenerate artifacts
+
 ---
 
-## 9. Individual Contributions
+## 9. Frontend Dashboard (Demo UI)
+
+The repository now includes a lightweight Streamlit dashboard in `ui/app.py` that reads existing outputs (`catalog.db`, `trace.log`) without duplicating or modifying pricing logic.
+
+### 9.1 Why this improves grading/demo quality
+
+- **Demonstrability:** evaluators can run the full flow from one screen (`Run Pipeline`, `Demo Reset + Run`).
+- **Observability:** per-agent status and recent trace events are visible during demos.
+- **Quality evidence:** metrics, strategy breakdown, and typed validation highlight engineering discipline.
+
+### 9.2 UI Architecture (Read-Only)
+
+```mermaid
+flowchart LR
+    graphPy["graph.py (pipeline run)"] --> catalogDb["catalog.db"]
+    graphPy --> traceLog["trace.log"]
+    streamlitUi["ui/app.py"] --> dataLayer["ui/data_access.py"]
+    dataLayer --> catalogDb
+    dataLayer --> traceLog
+    dataLayer --> uiModels["ui/models.py (Pydantic)"]
+```
+
+### 9.3 Run the dashboard
+
+```bash
+# Install dependencies (includes streamlit + pytest)
+pip install -r requirements.txt
+
+# Start dashboard
+streamlit run ui/app.py
+```
+
+### 9.4 UI features
+
+- Pipeline controls: `Run Pipeline`, `Demo Reset + Run`, `Refresh Data`
+- Status panel for: `InventoryManager`, `WebScraper`, `PriceStrategist`, `CatalogUpdater`
+- Results analytics:
+  - sortable/filterable pricing table
+  - strategy breakdown bar chart
+  - key metrics: rows processed, avg margin, fallback count, strategy types
+- Audit view showing recent parsed `trace.log` events
+
+### 9.5 Demo evidence checklist
+
+- Capture one screenshot of terminal-only run (`python graph.py`)
+- Capture one screenshot of dashboard with:
+  - status cards
+  - metrics
+  - results table
+  - audit view
+- Briefly explain that UI is read-only over persisted artifacts and does not alter core business logic.
+
+### 9.6 Frontend tests
+
+```bash
+pytest tests/test_ui_data_access.py tests/test_ui_app_smoke.py
+```
+
+These tests cover typed parsing, status/metric computations, and a basic dashboard helper smoke path.
+
+---
+
+## 10. Individual Contributions
 
 ### Member 1 — Inventory Manager
 
