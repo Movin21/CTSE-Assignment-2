@@ -4,10 +4,11 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from shared.logger import log_event
 from shared.llm import _llm
+from shared.logger import log_event
 from state import GlobalState
-from agents.inventory_manager.tool import read_inventory_csv
+
+from .tool import read_inventory_csv
 
 _SYSTEM_PROMPT = """You are a Detail-oriented Data Clerk in an e-commerce intelligence system.
 
@@ -27,15 +28,22 @@ RESPONSE FORMAT RULES:
   - Do NOT invent or modify any values."""
 
 
-def run_inventory_agent(state: GlobalState) -> GlobalState:
+def inventory_manager_node(state: GlobalState) -> GlobalState:
+    """Load inventory via LLM tool binding with direct-tool fallback."""
     log_event("AGENT_START", "InventoryManager", "→ entering node")
     start = time.time()
 
+    csv_path = state.get("csv_path", "inventory.csv")
     llm_with_tools = _llm.bind_tools([read_inventory_csv])
 
     messages = [
         SystemMessage(content=_SYSTEM_PROMPT),
-        HumanMessage(content="Load the inventory now using read_inventory_csv with csv_path='inventory.csv'."),
+        HumanMessage(
+            content=(
+                "Load the inventory now using read_inventory_csv with "
+                f"csv_path={csv_path!r}."
+            )
+        ),
     ]
 
     response: AIMessage = llm_with_tools.invoke(messages)
@@ -43,7 +51,9 @@ def run_inventory_agent(state: GlobalState) -> GlobalState:
 
     if response.tool_calls:
         for tc in response.tool_calls:
-            raw = read_inventory_csv.invoke(tc["args"])
+            args = tc.get("args", {}) if isinstance(tc, dict) else {}
+            path_arg = args.get("csv_path", csv_path) if isinstance(args, dict) else csv_path
+            raw = read_inventory_csv.invoke({"csv_path": path_arg})
             result = json.loads(raw)
             inventory_data = result.get("items", [])
             count = result.get("count", 0)
@@ -51,12 +61,13 @@ def run_inventory_agent(state: GlobalState) -> GlobalState:
             state["logs"].append(
                 f"[InventoryManager] read_inventory_csv → {count} products, status={status}"
             )
-            log_event("TOOL_INVOKE", "InventoryManager", f"args={tc['args']} → count={count}")
+            log_event("TOOL_INVOKE", "InventoryManager", f"args={args!r} → count={count}")
             if status.startswith("error:"):
                 state["errors"].append(f"InventoryManager: {status}")
+            break
     else:
         log_event("AGENT_WARN", "InventoryManager", "No tool call issued by LLM — forcing direct call")
-        raw = read_inventory_csv.invoke({"csv_path": "inventory.csv"})
+        raw = read_inventory_csv.invoke({"csv_path": csv_path})
         result = json.loads(raw)
         inventory_data = result.get("items", [])
         state["logs"].append(
@@ -69,6 +80,12 @@ def run_inventory_agent(state: GlobalState) -> GlobalState:
 
     elapsed = round(time.time() - start, 3)
     state["execution_times"]["InventoryManager"] = elapsed
-    log_event("AGENT_END", "InventoryManager",
-              f"← exiting node, loaded {len(inventory_data)} products, duration={elapsed}s")
+    log_event(
+        "AGENT_END",
+        "InventoryManager",
+        f"← exiting node, loaded {len(inventory_data)} products, duration={elapsed}s",
+    )
     return state
+
+
+run_inventory_agent = inventory_manager_node
