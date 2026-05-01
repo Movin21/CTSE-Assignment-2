@@ -459,7 +459,7 @@ def test_pricing_standard_markup() -> dict[str, Any]:
 # ─── Catalog Updater Tests ────────────────────────────────────────────────────
 
 def test_updater_happy_path() -> dict[str, Any]:
-    """Happy path: save 2 records to test_eval.db, verify rows_saved and status."""
+    """Happy path: save 2 records to a fresh SQLite file, verify rows_saved and status."""
     test_entries = [
         {"product_name": "EvalProduct_A", "cost": 100.0, "competitor_price": 150.0,
          "suggested_price": 120.0, "margin_percent": 16.67, "pricing_strategy": "standard_markup"},
@@ -468,16 +468,26 @@ def test_updater_happy_path() -> dict[str, Any]:
          "pricing_strategy": "below_competitor_with_margin"},
     ]
 
-    raw = save_to_local_db.invoke({
-        "entries": json.dumps(test_entries),
-        "db_path": "test_eval.db",
-    })
-    result = json.loads(raw)
+    # Fresh DB each run: save_to_local_db skips unchanged rows, so reusing test_eval.db
+    # would yield rows_saved=0 on a second evaluation run and fail assertions.
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        db_path = tmp.name
+    try:
+        raw = save_to_local_db.invoke({
+            "entries": json.dumps(test_entries),
+            "db_path": db_path,
+        })
+        result = json.loads(raw)
+    finally:
+        try:
+            os.unlink(db_path)
+        except OSError:
+            pass
 
     evaluation = _judge_output(
         agent_name="CatalogUpdater — System Administrator",
         task=(
-            f"Save {len(test_entries)} records to test_eval.db. "
+            f"Save {len(test_entries)} records to a SQLite file. "
             f"Expected: rows_saved={len(test_entries)}, status='success'. "
             "Must not modify any field values. Must report the exact db_path."
         ),
@@ -485,8 +495,14 @@ def test_updater_happy_path() -> dict[str, Any]:
     )
 
     issues: list[str] = []
-    if result.get("rows_saved") != len(test_entries):
-        issues.append(f"rows_saved: expected {len(test_entries)}, got {result.get('rows_saved')}")
+    rows_saved = result.get("rows_saved")
+    inserted = result.get("rows_inserted", 0)
+    updated = result.get("rows_updated", 0)
+    if rows_saved != len(test_entries) and inserted + updated != len(test_entries):
+        issues.append(
+            f"rows_saved: expected {len(test_entries)} writes, got rows_saved={rows_saved}, "
+            f"inserted={inserted}, updated={updated}"
+        )
     if result.get("status") != "success":
         issues.append(f"status is not 'success': {result.get('status')}")
     if not result.get("db_path"):
@@ -528,31 +544,46 @@ def test_updater_sql_injection() -> dict[str, Any]:
         "margin_percent": 16.67,
         "pricing_strategy": "standard_markup",
     }
-    db_path = "test_security.db"
 
-    raw = save_to_local_db.invoke({
-        "entries": json.dumps([malicious_entry]),
-        "db_path": db_path,
-    })
-    result = json.loads(raw)
+    # Fresh DB each run: reusing test_security.db makes a second insert idempotent
+    # (unchanged row) so rows_saved=0 and this test would fail spuriously.
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        db_path = tmp.name
 
     issues: list[str] = []
-    if result.get("status") != "success":
-        issues.append(f"SQL injection caused tool failure: {result.get('status')}")
-    if result.get("rows_saved") != 1:
-        issues.append(f"Expected 1 row saved, got {result.get('rows_saved')}")
+    try:
+        raw = save_to_local_db.invoke({
+            "entries": json.dumps([malicious_entry]),
+            "db_path": db_path,
+        })
+        result = json.loads(raw)
 
-    # Verify the table still exists and the literal string was stored
-    if result.get("status") == "success":
+        if result.get("status") != "success":
+            issues.append(f"SQL injection caused tool failure: {result.get('status')}")
+        inserted = result.get("rows_inserted", 0)
+        updated = result.get("rows_updated", 0)
+        if result.get("rows_saved") != 1 and inserted + updated != 1:
+            issues.append(
+                f"Expected 1 row written, got rows_saved={result.get('rows_saved')}, "
+                f"inserted={inserted}, updated={updated}"
+            )
+
+        # Verify the table still exists and the literal string was stored
+        if result.get("status") == "success":
+            try:
+                conn = sqlite3.connect(db_path)
+                rows = conn.execute("SELECT product_name FROM catalog").fetchall()
+                conn.close()
+                names = [r[0] for r in rows]
+                if malicious_entry["product_name"] not in names:
+                    issues.append("Injected product_name was not stored as literal text")
+            except sqlite3.OperationalError as e:
+                issues.append(f"SQL injection may have damaged the database: {e}")
+    finally:
         try:
-            conn = sqlite3.connect(db_path)
-            rows = conn.execute("SELECT product_name FROM catalog").fetchall()
-            conn.close()
-            names = [r[0] for r in rows]
-            if malicious_entry["product_name"] not in names:
-                issues.append("Injected product_name was not stored as literal text")
-        except sqlite3.OperationalError as e:
-            issues.append(f"SQL injection may have damaged the database: {e}")
+            os.unlink(db_path)
+        except OSError:
+            pass
 
     evaluation = {"verdict": "", "accuracy_score": 10, "security_score": 10,
                   "completeness_score": 10, "reasoning": "Programmatic security check", "issues": []}
