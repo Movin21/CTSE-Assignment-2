@@ -9,5 +9,3 @@ _llm = ChatOllama(
     base_url=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
     temperature=0,
 )
-
-llm = _llm
