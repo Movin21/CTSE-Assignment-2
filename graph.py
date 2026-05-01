@@ -83,6 +83,7 @@ def run_swarm() -> GlobalState:
               "══════ E-Commerce Competitor Intelligence Swarm STARTED ══════")
 
     initial_state: GlobalState = {
+        "csv_path": "inventory.csv",
         "inventory": [],
         "competitor_data": {},
         "pricing_logic": {},
