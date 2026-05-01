@@ -47,7 +47,6 @@ class GlobalState(TypedDict):
     Shared state object passed between all agent nodes in the LangGraph.
 
     Fields:
-        csv_path         — path to the merchant inventory CSV for the swarm
         inventory        — raw product records loaded from CSV
         competitor_data  — map of product_name → competitor_price
         pricing_logic    — map of product_name → full pricing analysis dict
@@ -58,7 +57,6 @@ class GlobalState(TypedDict):
         errors           — non-fatal errors collected across agents
         execution_times  — map of agent_name → elapsed seconds
     """
-    csv_path: str
     inventory: List[Dict[str, Any]]
     competitor_data: Dict[str, float]
     pricing_logic: Dict[str, Dict[str, Any]]
