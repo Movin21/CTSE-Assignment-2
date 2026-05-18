@@ -1,23 +1,11 @@
-from pathlib import Path
+"""LangChain tool binding for competitor price scraping."""
 
-import requests
-from bs4 import BeautifulSoup
 from langchain_core.tools import tool
-from pydantic import BaseModel, Field
 
+from .constants import AGENT_NAME
+from .models import ScrapeInput
+from .scraper import scrape_product
 from shared.logger import log_event
-
-
-class ScrapeInput(BaseModel):
-    product_name: str = Field(..., description="Exact product name to find")
-    html_source: str = Field(default="competitor.html", description="Local HTML path or HTTP URL")
-
-
-class ScrapeOutput(BaseModel):
-    product_name: str
-    competitor_price: float
-    source: str
-    status: str
 
 
 @tool
@@ -25,7 +13,7 @@ def scrape_competitor_price(product_name: str, html_source: str = "competitor.ht
     """Scrape a single competitor price for ``product_name`` using BeautifulSoup.
 
     Accepts either a local HTML file path or an HTTP/HTTPS URL as
-    ``html_source``.  Two parsing strategies are attempted in order:
+    ``html_source``. Two parsing strategies are attempted in order:
 
     1. Element with a ``data-name`` attribute matching the product name,
        containing a child with ``class="price"``.
@@ -38,85 +26,37 @@ def scrape_competitor_price(product_name: str, html_source: str = "competitor.ht
 
     Args:
         product_name: Exact product name to search for in the HTML.
-            Passed verbatim — do not URL-encode or escape.
-        html_source: A local file path (default ``"competitor.html"``) or a
-            fully-qualified HTTP/HTTPS URL to the competitor price page.
+        html_source: Local file path or HTTP/HTTPS URL (default ``competitor.html``).
 
     Returns:
-        JSON string conforming to ``ScrapeOutput``:
-        ``{"product_name": str, "competitor_price": float,
-           "source": str, "status": "success" | "fallback_used: <reason>"}``
+        JSON string conforming to ``ScrapeOutput``.
 
     Raises:
-        Does not raise — all exceptions trigger the fallback branch and are
-        encoded in the ``status`` field.
-
-    Example:
-        >>> raw = scrape_competitor_price.invoke(
-        ...     {"product_name": "Laptop", "html_source": "competitor.html"})
-        >>> import json; data = json.loads(raw)
-        >>> data["status"]
-        'success'
-        >>> data["competitor_price"]
-        999.99
+        Does not raise — failures are returned in the ``status`` field.
     """
-    log_event("TOOL_CALL", "WebScraper",
-              f"scrape_competitor_price(product='{product_name}', source='{html_source}')")
-    try:
-        if html_source.startswith(("http://", "https://")):
-            resp = requests.get(html_source, timeout=10)
-            resp.raise_for_status()
-            html_content = resp.text
-            source_label = html_source
-        else:
-            path = Path(html_source).resolve()
-            if not path.exists():
-                raise FileNotFoundError(f"HTML file not found: {html_source}")
-            html_content = path.read_text(encoding="utf-8")
-            source_label = str(path)
+    request = ScrapeInput(product_name=product_name, html_source=html_source)
+    log_event(
+        "TOOL_CALL",
+        AGENT_NAME,
+        (
+            f"scrape_competitor_price(product={request.product_name!r}, "
+            f"source={request.html_source!r})"
+        ),
+    )
 
-        soup = BeautifulSoup(html_content, "html.parser")
-        price: float | None = None
+    result = scrape_product(request.product_name, request.html_source)
 
-        # Strategy 1 — element with data-name attribute
-        elem = soup.find(attrs={"data-name": product_name})
-        if elem:
-            price_el = elem.find(class_="price")
-            if price_el:
-                price = float(price_el.get_text(strip=True).replace("$", "").replace(",", ""))
-
-        # Strategy 2 — table row: first cell = product name, second = price
-        if price is None:
-            for row in soup.find_all("tr"):
-                cells = row.find_all("td")
-                if cells and product_name.lower() in cells[0].get_text(strip=True).lower():
-                    if len(cells) > 1:
-                        price = float(
-                            cells[1].get_text(strip=True).replace("$", "").replace(",", "")
-                        )
-                        break
-
-        if price is None:
-            raise ValueError(f"Product '{product_name}' not found in HTML source")
-
-        out = ScrapeOutput(
-            product_name=product_name,
-            competitor_price=price,
-            source=source_label,
-            status="success",
+    if result.status.startswith("fallback_used"):
+        log_event(
+            "TOOL_ERROR",
+            AGENT_NAME,
+            f"scrape_competitor_price failed: {result.status} — using fallback",
         )
-        log_event("TOOL_RESULT", "WebScraper",
-                  f"'{product_name}' → ${price} (source: {source_label})")
-        return out.model_dump_json()
-
-    except Exception as exc:
-        log_event("TOOL_ERROR", "WebScraper",
-                  f"scrape_competitor_price failed: {exc} — using fallback")
-        fallback_price = 100.0
-        out = ScrapeOutput(
-            product_name=product_name,
-            competitor_price=fallback_price,
-            source="fallback_mock",
-            status=f"fallback_used: {exc}",
+    else:
+        log_event(
+            "TOOL_RESULT",
+            AGENT_NAME,
+            f"{request.product_name!r} → ${result.competitor_price} (source: {result.source})",
         )
-        return out.model_dump_json()
+
+    return result.model_dump_json()
